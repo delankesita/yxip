@@ -1,0 +1,61 @@
+name: DB Backup to R2
+
+on:
+  schedule:
+    - cron: '30 3 * * 0' # 每周日 03:30 UTC
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          MISSING=()
+          [ -z "$POSTGRES_URL" ] && [ -z "$DATABASE_URL" ] && MISSING+=("POSTGRES_URL|DATABASE_URL")
+          [ -z "$R2_ACCOUNT_ID" ] && MISSING+=("R2_ACCOUNT_ID")
+          [ -z "$R2_ACCESS_KEY_ID" ] && MISSING+=("R2_ACCESS_KEY_ID")
+          [ -z "$R2_SECRET_ACCESS_KEY" ] && MISSING+=("R2_SECRET_ACCESS_KEY")
+          [ -z "$R2_BUCKET" ] && MISSING+=("R2_BUCKET")
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "missing=true" >> $GITHUB_OUTPUT
+            echo "msg=Missing secrets: ${MISSING[*]} — skip backup" >> $GITHUB_OUTPUT
+          else
+            echo "missing=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if secrets missing
+        if: ${{ steps.check.outputs.missing == 'true' }}
+        run: echo "${{ steps.check.outputs.msg }}"
+
+      - name: Install tools
+        if: ${{ steps.check.outputs.missing != 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client awscli
+
+      - name: Dump database and upload to R2
+        if: ${{ steps.check.outputs.missing != 'true' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          URL="${POSTGRES_URL:-$DATABASE_URL}"
+          TS=$(date +%Y%m%d-%H%M%S)
+          FILE="db-${TS}.sql.gz"
+          echo "Starting pg_dump..."
+          pg_dump "$URL" | gzip > "$FILE"
+          echo "Uploading to R2..."
+          aws s3 cp "$FILE" "s3://${R2_BUCKET}/backups/${FILE}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          echo "Done: ${FILE}"
