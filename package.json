@@ -1,0 +1,13 @@
+{
+  "name": "openai-image-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal script to generate images using OpenAI Images API.",
+  "scripts": {
+    "generate:images": "node scripts/generate_images.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "openai": "^4.57.0"
+  }
+}
