@@ -1,0 +1,73 @@
+name: Failure Alerts
+
+on:
+  workflow_run:
+    workflows: ["Update IP List"]
+    types:
+      - completed
+
+jobs:
+  notify-on-failure:
+    if: ${{ github.event.workflow_run.conclusion != 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+      ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+    steps:
+      - name: Build alert message
+        id: msg
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          echo "title=Workflow Failed: ${{ github.event.workflow.name }}" >> $GITHUB_OUTPUT
+          printf "body=%s" "Repo: ${{ github.repository }}%0AWorkflow: ${{ github.event.workflow.name }}%0AConclusion: ${{ github.event.workflow_run.conclusion }}%0ARun: $RUN_URL" >> $GITHUB_OUTPUT
+
+      - name: Send Email via Resend (if secrets exist)
+        if: ${{ env.RESEND_API_KEY != '' && env.ALERT_EMAIL_FROM != '' && env.ALERT_EMAIL_TO != '' }}
+        run: |
+          curl -sS -X POST https://api.resend.com/emails \
+            -H "Authorization: Bearer $RESEND_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+                  "from": "'"${ALERT_EMAIL_FROM}"'",
+                  "to": ["'"${ALERT_EMAIL_TO}"'"],
+                  "subject": "'"${{ steps.msg.outputs.title }}"'",
+                  "text": "'"${{ steps.msg.outputs.body }}"'"
+                }'
+
+      - name: Send to DingTalk (if webhook exists)
+        if: ${{ env.DINGTALK_WEBHOOK != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEXT="${{ steps.msg.outputs.title }}%0A${{ steps.msg.outputs.body }}"
+          WEBHOOK="$DINGTALK_WEBHOOK"
+          if [ -n "${DINGTALK_SECRET}" ]; then
+            TS=$(($(date +%s%N)/1000000))
+            STRING_TO_SIGN="${TS}\n${DINGTALK_SECRET}"
+            SIGN=$(printf "%s" "$STRING_TO_SIGN" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
+            # 如果原始 webhook 已包含 query，请自行在控制台生成带签名的 URL，这里默认追加
+            if [[ "$WEBHOOK" == *"?"* ]]; then
+              WEBHOOK="${WEBHOOK}&timestamp=${TS}&sign=$(python3 -c "import urllib.parse; print(urllib.parse.quote('"$SIGN"'))")"
+            else
+              WEBHOOK="${WEBHOOK}?timestamp=${TS}&sign=$(python3 -c "import urllib.parse; print(urllib.parse.quote('"$SIGN"'))")"
+            fi
+          fi
+          curl -sS -X POST "$WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"${TEXT}\"}}"
+
+      - name: Send to WeCom (if webhook exists)
+        if: ${{ env.WECOM_WEBHOOK != '' }}
+        run: |
+          TEXT="${{ steps.msg.outputs.title }}\n${{ steps.msg.outputs.body }}"
+          curl -sS -X POST "$WECOM_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d '{
+                  "msgtype": "text",
+                  "text": {"content": "'"'"'"'"'${TEXT}'"'"'"'"'"}
+                }'
